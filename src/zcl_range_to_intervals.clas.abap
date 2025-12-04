@@ -1,156 +1,185 @@
 CLASS zcl_range_to_intervals DEFINITION
-  PUBLIC
-  FINAL
-  CREATE PUBLIC .
+  PUBLIC FINAL
+  CREATE PUBLIC.
 
   PUBLIC SECTION.
-    TYPES tr_time TYPE RANGE OF t.
-    TYPES:
-      BEGIN OF ts_interval,
-        from_time     TYPE t,
-        to_time     TYPE t,
-        is_in_range TYPE abap_bool,
-      END OF ts_interval.
-    TYPES tt_interval TYPE SORTED TABLE OF ts_interval WITH UNIQUE KEY primary_key ALIAS by_from_time COMPONENTS from_time.
-
-    METHODS constructor
-      IMPORTING ir_time TYPE tr_time.
-
-    METHODS get_intervals
-      retURNING VALUE(rt_interval) TYPE tt_interval.
+    CLASS-METHODS convert
+      IMPORTING any_ranges_table TYPE STANDARD TABLE
+      EXPORTING !intervals       TYPE SORTED TABLE
+      RAISING   zcx_range_to_intervals.
 
   PRIVATE SECTION.
-    TYPES:
-      BEGIN OF ts_splitting,
-        value_before TYPE t,
-        value_after  TYPE t,
-      END OF ts_splitting.
-    TYPES tt_splitting TYPE SORTED TABLE OF ts_splitting WITH UNIQUE KEY primary_key ALIAS by_value_before COMPONENTS value_before.
+    CLASS-METHODS get_ranges_table_base_type
+      IMPORTING rtti             TYPE REF TO cl_abap_typedescr
+      RETURNING VALUE(base_type) TYPE REF TO cl_abap_typedescr.
 
-    DATA splittings  TYPE tt_splitting.
-    DATA gr_time TYPE tr_time.
+    CLASS-METHODS is_ranges_table
+      IMPORTING rtti            TYPE REF TO cl_abap_typedescr
+      RETURNING VALUE(is_range) TYPE abap_bool.
 
-    METHODS get_range_key_values
-      RAISING lcx_range_invalid.
-
-    METHODS split_at_v_and_v_plus_1
-      IMPORTING v TYPE any.
-
-    METHODS split_at_v_minus_1_and_v
-      IMPORTING v TYPE any.
-
+    CLASS-METHODS is_ranges_table_line
+      IMPORTING rtti                 TYPE REF TO cl_abap_typedescr
+      RETURNING VALUE(is_range_line) TYPE abap_bool.
 ENDCLASS.
 
 
 CLASS zcl_range_to_intervals IMPLEMENTATION.
-  METHOD constructor.
-    super->constructor( ).
-    gr_time = ir_time.
-  ENDMETHOD.
-
-  METHOD get_intervals.
-    DATA previous_interval TYPE REF TO ts_interval.
-
-    get_range_key_values( ).
-
-    insert value #( value_before = '235959' ) into table splittings.
-
-    DATA(interval) = VALUE ts_interval( from_time = '000000' ).
-
-    LOOP AT splittings REFERENCE INTO DATA(splitting).
-      " Build the interval
-      interval-to_time     = splitting->value_before.
-      interval-is_in_range = boolc( interval-from_time IN gr_time ).
-
-      " Merge the interval with the previous one or insert a new one
-      IF     previous_interval    IS BOUND
-         AND interval-is_in_range  = previous_interval->is_in_range.
-        previous_interval->to_time = interval-to_time.
-      ELSE.
-        INSERT interval INTO TABLE rt_interval REFERENCE INTO previous_interval.
-      ENDIF.
-
-      interval = VALUE #( from_time = splitting->value_after ).
-    ENDLOOP.
-
-*    interval-to_time     = '235959'.
-*    interval-is_in_range = boolc( interval-from_time IN gr_time ).
-*    INSERT interval INTO TABLE rt_interval.
-  ENDMETHOD.
-
-  METHOD split_at_v_and_v_plus_1.
-    DATA(splitting) = VALUE ts_splitting( value_before = v ).
-    IF splitting-value_before <> '235959'.
-      splitting-value_after = splitting-value_before + 1.
+  METHOD convert.
+    DATA(lo_ranges_table_typedescr) = cl_abap_typedescr=>describe_by_data( any_ranges_table ).
+    IF abap_false = is_ranges_table( lo_ranges_table_typedescr ).
+      RAISE EXCEPTION TYPE zcx_range_to_intervals
+        EXPORTING
+          textid = zcx_range_to_intervals=>invalid_ranges_table.
     ENDIF.
-    INSERT splitting INTO TABLE splittings.
+
+    DATA(lo_ranges_table_base_type) = get_ranges_table_base_type( lo_ranges_table_typedescr ).
+    CASE lo_ranges_table_base_type->type_kind.
+      WHEN lo_ranges_table_base_type->typekind_date.
+        DATA(lo_date_converter) = NEW zcl_range_to_intervals__date( any_ranges_table ).
+        intervals = lo_date_converter->get_intervals( ).
+      WHEN lo_ranges_table_base_type->typekind_time.
+        DATA(lo_time_converter) = NEW zcl_range_to_intervals__time( any_ranges_table ).
+        intervals = lo_time_converter->get_intervals( ).
+      WHEN OTHERS.
+        RAISE EXCEPTION TYPE zcx_range_to_intervals
+          EXPORTING
+            textid = zcx_range_to_intervals=>base_type_not_supported.
+    ENDCASE.
   ENDMETHOD.
 
-  METHOD split_at_v_minus_1_and_v.
-    DATA(splitting) = VALUE ts_splitting( value_after = v ).
-    IF splitting-value_after <> '000000'.
-      splitting-value_before = splitting-value_after - 1.
+  METHOD get_ranges_table_base_type.
+    DATA rtti_tab TYPE REF TO cl_abap_tabledescr.
+    DATA rtti_str TYPE REF TO cl_abap_structdescr.
+
+    FIELD-SYMBOLS <comp> TYPE abap_compdescr.
+    FIELD-SYMBOLS <low>  TYPE abap_compdescr.
+    FIELD-SYMBOLS <high> TYPE abap_compdescr.
+
+    CLEAR base_type.
+    " Parameter MUST BE either CL_ABAP_TABLEDESCR, with lines of type CL_ABAP_STRUCTDESCR
+    "                       or CL_ABAP_STRUCTDESCR.
+    TRY.
+        rtti_tab ?= rtti.
+        rtti_str ?= rtti_tab->get_table_line_type( ).
+      CATCH cx_sy_move_cast_error.
+        " Not CL_ABAP_TABLEDESCR, try CL_ABAP_STRUCTDESCR
+        TRY.
+            rtti_str ?= rtti.
+          CATCH cx_sy_move_cast_error.
+            " Not even CL_ABAP_STRUCTDESCR
+            RETURN.
+        ENDTRY.
+    ENDTRY.
+
+    " Line must have 4 components
+    IF lines( rtti_str->components ) <> 4.
+      RETURN.
     ENDIF.
-    INSERT splitting INTO TABLE splittings.
+
+    READ TABLE rtti_str->components INDEX 1 ASSIGNING <comp>.
+    IF <comp>-type_kind <> cl_abap_typedescr=>typekind_char.
+      RETURN.
+    ENDIF.
+    IF <comp>-length <> 1 * cl_abap_char_utilities=>charsize.
+      RETURN.
+    ENDIF.
+
+    READ TABLE rtti_str->components INDEX 2 ASSIGNING <comp>.
+    IF <comp>-type_kind <> cl_abap_typedescr=>typekind_char.
+      RETURN.
+    ENDIF.
+    IF <comp>-length <> 2 * cl_abap_char_utilities=>charsize.
+      RETURN.
+    ENDIF.
+
+    READ TABLE rtti_str->components INDEX 3 ASSIGNING <low>.
+    READ TABLE rtti_str->components INDEX 4 ASSIGNING <high>.
+    IF <low>-type_kind <> <high>-type_kind.
+      RETURN.
+    ENDIF.
+    IF <low>-length <> <high>-length.
+      RETURN.
+    ENDIF.
+    base_type = rtti_str->get_component_type( p_name = <low>-name ).
   ENDMETHOD.
 
-  METHOD get_range_key_values.
-*    DATA line_of_ranges_table TYPE REF TO data.
-*    DATA range_key_value      TYPE REF TO data.
+  METHOD is_ranges_table.
+    DATA rtti_tab  TYPE REF TO cl_abap_tabledescr.
+    DATA rtti_line TYPE REF TO cl_abap_typedescr.
 
-*    FIELD-SYMBOLS <lt_range_key_value> TYPE STANDARD TABLE.
-*
-*    CREATE DATA line_of_ranges_table LIKE LINE OF any_ranges_table.
-*    ASSIGN line_of_ranges_table->* TO FIELD-SYMBOL(<line_of_ranges_table>).
-*    ASSIGN COMPONENT 3 OF STRUCTURE <line_of_ranges_table> TO FIELD-SYMBOL(<low>).
-*    ASSERT sy-subrc = 0.
-*    CREATE DATA rt_range_key_value LIKE STANDARD TABLE OF <low>.
-*    ASSIGN rt_range_key_value->* TO <lt_range_key_value>.
-*    CREATE DATA range_key_value LIKE <low>.
-*    ASSIGN range_key_value->* TO FIELD-SYMBOL(<range_key_value>).
+    is_range = abap_false.
 
-    LOOP AT gr_time ASSIGNING FIELD-SYMBOL(<line_of_ranges_table>).
-*    LOOP AT any_ranges_table ASSIGNING <line_of_ranges_table>.
-      ASSIGN COMPONENT 2 OF STRUCTURE <line_of_ranges_table> TO FIELD-SYMBOL(<option>).
-      ASSERT sy-subrc = 0.
-      ASSIGN COMPONENT 3 OF STRUCTURE <line_of_ranges_table> TO FIELD-SYMBOL(<low>).
-      ASSERT sy-subrc = 0.
-      ASSIGN COMPONENT 4 OF STRUCTURE <line_of_ranges_table> TO FIELD-SYMBOL(<high>).
-      ASSERT sy-subrc = 0.
+    TRY.
+        " s'assurer que le type est un type de table
+        rtti_tab ?= rtti.
+        " récupérer le type de ligne du type de table
+        rtti_line = rtti_tab->get_table_line_type( ).
+        " s'assurer que le type de ligne est une ligne de range
+        is_range = is_ranges_table_line( rtti_line ).
+      CATCH cx_sy_move_cast_error.
+        RETURN.
+    ENDTRY.
+  ENDMETHOD.
 
-      "        V-1 V V+1 W-1 W W+1
-      " BT V W  F  T  T   T  T  F
-      " CP V++  T  F  T
-      " CP V*1  T  F  T
-      " EQ V    F  T  F
-      " GE V    F  T  T
-      " GT V    F  F  T
-      " LE V    T  T  F
-      " LT V    T  F  F
-      " NB V W  T  F  F   F  F  T
-      " NE V    T  F  T
-      " NP V++  F  T  F
-      " NP V*1  F  T  F
-      CASE <option>.
-        WHEN 'BT' OR 'NB'.
-          split_at_v_minus_1_and_v( v = <low> ).
-          split_at_v_and_v_plus_1( v = <high> ).
-        WHEN 'CP' OR 'NP'.
-          " TODO
-        WHEN 'EQ' OR 'NE'.
-          split_at_v_minus_1_and_v( <low> ).
-          split_at_v_and_v_plus_1( <low> ).
-        WHEN 'GE'.
-          split_at_v_minus_1_and_v( v = <low> ).
-        WHEN 'GT'.
-          split_at_v_and_v_plus_1( v = <low> ).
-        WHEN 'LE'.
-          split_at_v_and_v_plus_1( v = <low> ).
-        WHEN 'LT'.
-          split_at_v_minus_1_and_v( v = <low> ).
-        WHEN OTHERS.
-          RAISE EXCEPTION TYPE lcx_range_invalid.
-      ENDCASE.
-    ENDLOOP.
+  METHOD is_ranges_table_line.
+    DATA rtti_str TYPE REF TO cl_abap_structdescr.
+    DATA lt_comp  TYPE cl_abap_structdescr=>component_table.
+
+    FIELD-SYMBOLS <sign>   TYPE abap_componentdescr.
+    FIELD-SYMBOLS <option> TYPE abap_componentdescr.
+    FIELD-SYMBOLS <low>    TYPE abap_componentdescr.
+    FIELD-SYMBOLS <high>   TYPE abap_componentdescr.
+
+    is_range_line = abap_false.
+
+    TRY.
+        " s'assurer que le type est une structure
+        rtti_str ?= rtti.
+      CATCH cx_sy_move_cast_error.
+        RETURN.
+    ENDTRY.
+
+    IF lines( rtti_str->components ) <> 4.
+      RETURN.
+    ENDIF.
+
+    " TODO: variable is never used (ABAP cleaner)
+    FIELD-SYMBOLS <ls_comp> TYPE LINE OF cl_abap_structdescr=>component_table.
+
+    lt_comp = rtti_str->get_components( ).
+    READ TABLE lt_comp INDEX 1 ASSIGNING <sign>.
+    READ TABLE lt_comp INDEX 2 ASSIGNING <option>.
+    READ TABLE lt_comp INDEX 3 ASSIGNING <low>.
+    READ TABLE lt_comp INDEX 4 ASSIGNING <high>.
+
+    IF <sign>-name <> 'SIGN'.
+      RETURN.
+    ENDIF.
+    IF <sign>-type->type_kind <> cl_abap_typedescr=>typekind_char.
+      RETURN.
+    ENDIF.
+    IF <sign>-type->length <> 1 * cl_abap_char_utilities=>charsize.
+      RETURN.
+    ENDIF.
+    IF <option>-name <> 'OPTION'.
+      RETURN.
+    ENDIF.
+    IF <option>-type->type_kind <> cl_abap_typedescr=>typekind_char.
+      RETURN.
+    ENDIF.
+    IF <option>-type->length <> 2 * cl_abap_char_utilities=>charsize.
+      RETURN.
+    ENDIF.
+    IF <low>-name <> 'LOW'.
+      RETURN.
+    ENDIF.
+    IF <high>-name <> 'HIGH'.
+      RETURN.
+    ENDIF.
+    IF <low>-type <> <high>-type.
+      RETURN.
+    ENDIF.
+
+    is_range_line = abap_true.
   ENDMETHOD.
 ENDCLASS.
