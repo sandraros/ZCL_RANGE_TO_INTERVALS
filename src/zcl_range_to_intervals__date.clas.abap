@@ -11,7 +11,7 @@ CLASS zcl_range_to_intervals__date DEFINITION
         to          TYPE d,
         is_in_range TYPE abap_bool,
       END OF ts_interval.
-    TYPES tt_interval TYPE SORTED TABLE OF ts_interval WITH UNIQUE KEY primary_key ALIAS by_from_date COMPONENTS from.
+    TYPES tt_interval TYPE SORTED TABLE OF ts_interval WITH UNIQUE KEY primary_key ALIAS by_from COMPONENTS from.
 
     METHODS constructor
       IMPORTING ir_date TYPE tr_date.
